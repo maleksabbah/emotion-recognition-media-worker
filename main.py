@@ -1,6 +1,4 @@
-"""Media Worker entry point for Docker."""
-import asyncio
-from app.Worker import main
+"""Root entry point — re-exports the FastAPI app from app/main.py."""
+from app.main import app
 
-if __name__ == "__main__":
-    asyncio.run(main())
+__all__ = ["app"]

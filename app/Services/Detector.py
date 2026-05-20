@@ -317,3 +317,112 @@ class FaceDetector:
             ))
 
         return detections
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Cropping — one method, one loop
+# ──────────────────────────────────────────────────────────────────────
+
+import base64
+
+FACE_SIZE = 224
+REGION_SIZE = 64
+
+# (landmark_a, landmark_b, vertical_fraction_fallback)
+# For forehead, only one landmark; second slot is None.
+_REGION_SPECS = {
+    "eyes":     ("left_eye",   "right_eye",    0.35),
+    "mouth":    ("mouth_left", "mouth_right",  0.75),
+    "cheeks":   ("left_cheek", "right_cheek",  0.55),
+    "forehead": ("forehead",   None,           0.15),
+}
+
+
+@dataclass
+class FaceWithCrops:
+    """A detected face plus its base64-encoded crops, ready to send over Kafka."""
+    detection: "FaceDetection"
+    face_crop: str
+    eyes: str
+    mouth: str
+    cheeks: str
+    forehead: str
+
+
+def _detect_and_crop(self, image_bytes: bytes) -> list[FaceWithCrops]:
+    """
+    Decode → detect → crop 5 regions → base64 encode.
+    Returns one FaceWithCrops per detected face.
+    """
+    # Decode JPEG bytes
+    arr = np.frombuffer(image_bytes, dtype=np.uint8)
+    image = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+    if image is None:
+        logger.error("Failed to decode image bytes")
+        return []
+
+    detections = self.detect(image)
+    h, w = image.shape[:2]
+    results: list[FaceWithCrops] = []
+
+    for det in detections:
+        x1, y1, x2, y2 = det.bbox
+        lm = det.landmarks
+
+        # Face crop — bbox + 10% padding, resize to 224
+        pad_x = int((x2 - x1) * 0.1)
+        pad_y = int((y2 - y1) * 0.1)
+        face = cv2.resize(
+            image[max(0, y1-pad_y):min(h, y2+pad_y),
+                  max(0, x1-pad_x):min(w, x2+pad_x)],
+            (FACE_SIZE, FACE_SIZE),
+        )
+
+        # Region crops — square side scales with face width, min 64px
+        side = max(int((x2 - x1) * 0.4), REGION_SIZE)
+        half = side // 2
+
+        crops: dict[str, np.ndarray] = {"face": face}
+        for name, (lm_a, lm_b, frac) in _REGION_SPECS.items():
+            # Pick center: landmark midpoint if available, else bbox fraction
+            if lm_a in lm and (lm_b is None or lm_b in lm):
+                if lm_b is None:
+                    cx, cy = lm[lm_a].x, lm[lm_a].y
+                else:
+                    cx = (lm[lm_a].x + lm[lm_b].x) / 2
+                    cy = (lm[lm_a].y + lm[lm_b].y) / 2
+            else:
+                cx = (x1 + x2) / 2
+                cy = y1 + (y2 - y1) * frac
+
+            # Slice — clamp to image, reflect-pad any overhang, resize
+            rx1, ry1 = int(cx - half), int(cy - half)
+            rx2, ry2 = rx1 + side, ry1 + side
+            pad_l = max(0, -rx1); pad_t = max(0, -ry1)
+            pad_r = max(0, rx2 - w); pad_b = max(0, ry2 - h)
+            sl = image[max(0, ry1):min(h, ry2), max(0, rx1):min(w, rx2)]
+            if pad_l or pad_t or pad_r or pad_b:
+                sl = cv2.copyMakeBorder(
+                    sl, pad_t, pad_b, pad_l, pad_r, cv2.BORDER_REFLECT_101,
+                )
+            crops[name] = cv2.resize(sl, (REGION_SIZE, REGION_SIZE))
+
+        # JPEG-encode + base64
+        b64: dict[str, str] = {}
+        for name, img in crops.items():
+            _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
+            b64[name] = base64.b64encode(buf.tobytes()).decode("utf-8")
+
+        results.append(FaceWithCrops(
+            detection=det,
+            face_crop=b64["face"],
+            eyes=b64["eyes"],
+            mouth=b64["mouth"],
+            cheeks=b64["cheeks"],
+            forehead=b64["forehead"],
+        ))
+
+    return results
+
+
+FaceDetector.detect_and_crop = _detect_and_crop
