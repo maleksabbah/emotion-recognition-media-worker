@@ -49,10 +49,13 @@ class FaceDetector:
     # ── MTCNN (face detection) ─────────────────────────
 
     def _get_mtcnn(self):
+        # mtcnn==1.0.0 (TensorFlow-based PyPI package) dropped the
+        # min_face_size kwarg from __init__ — it's no longer accepted.
+        # Smaller-face filtering is done after detection via bbox area.
         if self._mtcnn is None:
             try:
                 from mtcnn import MTCNN
-                self._mtcnn = MTCNN(min_face_size=40)
+                self._mtcnn = MTCNN()
                 logger.info("MTCNN loaded")
             except ImportError:
                 logger.warning("MTCNN not installed — face detection unavailable")
@@ -62,25 +65,49 @@ class FaceDetector:
     def _detect_faces_mtcnn(self, image_rgb: np.ndarray) -> list[dict]:
         """
         Detect faces using MTCNN.
-        Returns list of {bbox: (x1,y1,x2,y2), confidence: float}
+
+        mtcnn==1.0.0 returns a list of dicts with keys 'box' [x, y, w, h]
+        and 'confidence'. Older versions may key the score as 'score' so we
+        accept either. Faces below MIN_FACE_PX in the larger side are
+        dropped (the old min_face_size=40 enforced this).
+
+        Returns list of {bbox: (x1,y1,x2,y2), confidence: float}.
         """
+        MIN_FACE_PX = 40
+
         mtcnn = self._get_mtcnn()
         if mtcnn is None:
             return []
 
-        results = mtcnn.detect_faces(image_rgb)
-        faces = []
-        for r in results:
-            if r["confidence"] < self.min_confidence:
+        try:
+            results = mtcnn.detect_faces(image_rgb)
+        except Exception as e:
+            logger.error("MTCNN detect_faces failed: %s", e)
+            return []
+
+        faces: list[dict] = []
+        for r in results or []:
+            # 1.0.0 → 'confidence', older → 'score'; accept either.
+            conf = r.get("confidence", r.get("score", 0.0))
+            if conf < self.min_confidence:
                 continue
-            x, y, w, h = r["box"]
-            x1 = max(0, x)
-            y1 = max(0, y)
-            x2 = x + w
-            y2 = y + h
+
+            box = r.get("box") or r.get("bbox")
+            if not box or len(box) < 4:
+                continue
+            x, y, w, h = box
+
+            # Drop tiny faces — replaces the old min_face_size= kwarg.
+            if max(w, h) < MIN_FACE_PX:
+                continue
+
+            x1 = max(0, int(x))
+            y1 = max(0, int(y))
+            x2 = int(x + w)
+            y2 = int(y + h)
             faces.append({
                 "bbox": (x1, y1, x2, y2),
-                "confidence": r["confidence"],
+                "confidence": float(conf),
             })
 
         return faces
