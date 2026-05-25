@@ -1,4 +1,6 @@
-"""Root entry point — re-exports the FastAPI app from app/main.py."""
-from app.main import app
+"""Root entry point — runs the media worker."""
+import asyncio
+from app.main import run
 
-__all__ = ["app"]
+if __name__ == "__main__":
+    asyncio.run(run())
