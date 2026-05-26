@@ -11,7 +11,7 @@ WORKDIR /app
 #   libgl1, libglib2.0-0, libsm6, libxrender1, libxext6 → OpenCV / mediapipe
 #   ffmpeg                                              → video decoding
 #   curl                                                → fetch face_landmarker.task model
-#   build-essential, python3-dev                        → compile insightface (Cython extensions)
+#   build-essential, python3-dev, gcc, g++              → compile insightface (C/C++ extensions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -22,6 +22,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
     build-essential \
     python3-dev \
+    gcc \
+    g++ \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
