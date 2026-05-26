@@ -94,7 +94,8 @@ class FaceDetector:
         if self._mtcnn is None:
             try:
                 from mtcnn import MTCNN
-                self._mtcnn = MTCNN(min_face_size=40)
+                # MTCNN 1.0+ dropped min_face_size from __init__; filter below.
+                self._mtcnn = MTCNN()
                 logger.info("MTCNN loaded")
             except ImportError:
                 logger.warning("MTCNN not installed")
@@ -111,6 +112,9 @@ class FaceDetector:
             if r["confidence"] < self.min_confidence:
                 continue
             x, y, w, h = r["box"]
+            # Filter tiny faces here (post-hoc) since MTCNN 1.0 no longer accepts min_face_size.
+            if w < 40 or h < 40:
+                continue
             faces.append({
                 "bbox": (max(0, x), max(0, y), x + w, y + h),
                 "confidence": r["confidence"],
