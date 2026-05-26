@@ -15,12 +15,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxrender1 \
     libxext6 \
     ffmpeg \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
+# Mediapipe Tasks API requires a downloaded .task model file.
+# The legacy mp.solutions.face_mesh API was removed in newer mediapipe;
+# we use the new mp.tasks.vision.FaceLandmarker which loads from a file.
+RUN mkdir -p /app/models && \
+    curl -fsSL -o /app/models/face_landmarker.task \
+      https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task
+
 COPY app/ ./app/
 COPY main.py .
+
+ENV FACE_LANDMARKER_TASK=/app/models/face_landmarker.task
 
 CMD ["python", "main.py"]
