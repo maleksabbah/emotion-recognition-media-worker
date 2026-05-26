@@ -333,17 +333,17 @@ class FaceDetector:
 
             # MediaPipe first
             landmarks = self._extract_landmarks_mediapipe(face_crop_rgb, cx1, cy1)
-            detector_name = "mtcnn+mediapipe"
+            detector_name = "mediapipe"
 
             # InsightFace if MediaPipe didn't return anything
             if not landmarks:
                 landmarks = self._extract_landmarks_insightface(face_crop_bgr, cx1, cy1)
-                detector_name = "mtcnn+insightface"
+                detector_name = "insightface"
 
             # Estimate from bbox as last resort
             if not landmarks:
                 landmarks = self._estimate_landmarks((x1, y1, x2, y2))
-                detector_name = "mtcnn+estimated"
+                detector_name = "fallback"
 
             detections.append(FaceDetection(
                 bbox=(x1, y1, x2, y2),
