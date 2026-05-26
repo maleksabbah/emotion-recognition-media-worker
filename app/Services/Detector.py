@@ -172,7 +172,10 @@ class FaceDetector:
 
         try:
             import mediapipe as mp
-            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=face_crop_rgb)
+            # MediaPipe's C++ binding requires a contiguous uint8 RGB array.
+            # cv2 slicing can produce non-contiguous views, hence ascontiguousarray.
+            rgb = np.ascontiguousarray(face_crop_rgb, dtype=np.uint8)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             result = landmarker.detect(mp_image)
         except Exception as e:
             logger.warning("MediaPipe detect failed: %s", e)
