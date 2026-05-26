@@ -7,7 +7,11 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# OpenCV + mediapipe + ffmpeg system deps
+# Runtime + build deps:
+#   libgl1, libglib2.0-0, libsm6, libxrender1, libxext6 → OpenCV / mediapipe
+#   ffmpeg                                              → video decoding
+#   curl                                                → fetch face_landmarker.task model
+#   build-essential, python3-dev                        → compile insightface (Cython extensions)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
@@ -16,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libxext6 \
     ffmpeg \
     curl \
+    build-essential \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
