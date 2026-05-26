@@ -297,27 +297,20 @@ class FaceDetector:
             logger.error("Failed to decode image bytes: %s", e)
             return []
 
-        rgb_np = np.array(image_pil)
-        img_h, img_w = rgb_np.shape[:2]
+        img_w, img_h = image_pil.size
 
-        faces = self._detect_faces_mtcnn(rgb_np)
-        if not faces:
-            logger.debug("MTCNN found nothing — falling back to center crop")
-            side = min(img_h, img_w)
-            cx, cy = img_w // 2, img_h // 2
-            half = side // 2
-            faces = [{
-                "bbox": (cx - half, cy - half, cx + half, cy + half),
-                "confidence": 0.1,
-            }]
+        # NO MTCNN. Training's convert_dataset() never ran MTCNN — it took the
+        # input image as-is (already-cropped headshots from FER+/RAF-DB/AffectNet)
+        # and resized to 128. Production now matches: treat the whole upload as
+        # the face. User is expected to upload a headshot, not a wide-angle photo.
+        faces = [{
+            "bbox": (0, 0, img_w, img_h),
+            "confidence": 1.0,
+        }]
 
         results: list[FaceWithCrops] = []
         for face in faces:
             x1, y1, x2, y2 = face["bbox"]
-            x1, y1 = max(0, x1), max(0, y1)
-            x2, y2 = min(img_w, x2), min(img_h, y2)
-            if x2 <= x1 or y2 <= y1:
-                continue
 
             # Crop face from original PIL, resize to 128 (training scale)
             face_pil_128 = image_pil.crop((x1, y1, x2, y2)).resize((TRAIN_FACE, TRAIN_FACE))
