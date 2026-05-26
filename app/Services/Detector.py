@@ -338,12 +338,12 @@ class FaceDetector:
                 for name, img in region_crops.items()
             }
 
-            # Face for the model is 224x224 — upscale from the 128 crop with PIL
-            face_pil_224 = face_pil_128.resize((FACE_SIZE, FACE_SIZE))
-
+            # Face for the model: send at 128x128 (training storage size).
+            # Predictor's FACE_TRANSFORM.Resize(224) does the upsample,
+            # matching training's DataLoader exactly.
             # JPEG-encode + base64 each (RGB, quality 95 — matches training save)
             b64 = {
-                "face":     _pil_to_b64_jpeg(face_pil_224),
+                "face":     _pil_to_b64_jpeg(face_pil_128),
                 "eyes":     _pil_to_b64_jpeg(region_crops["eyes"]),
                 "mouth":    _pil_to_b64_jpeg(region_crops["mouth"]),
                 "cheeks":   _pil_to_b64_jpeg(region_crops["cheeks"]),
