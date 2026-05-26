@@ -1,38 +1,45 @@
 """
-FaceDetector — MTCNN for face detection + MediaPipe FaceMesh polygon
-region cropping that matches the training pipeline exactly.
+FaceDetector — detection + cropping identical to the training pipeline.
 
-Pipeline:
-  1. MTCNN finds faces -> bounding boxes
-  2. For each face, crop face_bbox -> resize to 128x128 (training scale)
-  3. Run MediaPipe FaceMesh on the 128 crop, gather full landmark polygons
-     for eyes / mouth / cheeks / forehead
-  4. Each region = bounding box of its landmark polygon + 10px pad
-  5. Resize face to 224 (Predictor expects 224), regions to 64
-  6. JPEG-encode + base64
+Training reference (Face_Service in UNetProject):
+    1. MTCNN finds faces in the original image.
+    2. Crop the face bbox via PIL .crop, resize to 128x128 with PIL.
+    3. Run MediaPipe FaceMesh on the 128x128 face (numpy RGB).
+    4. For each region: collect ~20 landmark points, take bbox of points
+       with 10px pad, PIL.crop from the 128x128 face.
+    5. PIL.resize each region to 64x64. Save as JPEG quality 95.
 
-Mirrors `Face_Service._extract_regions_landmarks` from training (same
-landmark index sets, same padding). If MediaPipe fails, fall back to
-InsightFace 5-point landmarks projected to rough rectangles; if THAT
-fails, bbox-fraction estimates. Each tier marks the detection so callers
-can filter on quality.
+Production used to do all of this with cv2, which:
+  - Read JPEGs as BGR,
+  - Used cv2.resize (different interpolation default than PIL),
+  - cv2.imencode'd the BGR array as JPEG — which decoders then read as RGB,
+    flipping red and blue.
+
+That is the most likely reason the prediction was wrong even though the
+checkpoint loads cleanly and labels match. This file rewrites the detector
+to use PIL everywhere the training pipeline did.
+
+cv2 is still used for one thing: MTCNN/InsightFace need numpy arrays in
+BGR/RGB and that's the conventional way to pass them. We convert to/from
+PIL right at the edges.
 """
 from __future__ import annotations
 
 import base64
+import io
 import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-import cv2
 import numpy as np
+from PIL import Image
 
 logger = logging.getLogger("media-worker.detector")
 
-FACE_SIZE = 224
-TRAIN_FACE = 128
+FACE_SIZE = 224       # model expects 224 for the face stream
+TRAIN_FACE = 128      # training extracted regions from a 128x128 face crop
 REGION_SIZE = 64
-REGION_PAD = 10
+REGION_PAD = 10       # px padding around landmark polygon (matches training)
 
 
 # ── Landmark index sets — verbatim from training Face_Service ──
@@ -65,20 +72,49 @@ REGION_LANDMARKS = {
 
 @dataclass
 class FaceDetection:
-    bbox: tuple[int, int, int, int]
+    bbox: tuple[int, int, int, int]           # x1, y1, x2, y2 (orig image)
     confidence: float
-    landmark_tier: str = "fallback"   # mediapipe | insightface | fallback
+    landmark_tier: str = "fallback"           # mediapipe | insightface | fallback
     detector: str = "unknown"
 
 
 @dataclass
 class FaceWithCrops:
     detection: FaceDetection
-    face_crop: str
-    eyes: str
+    face_crop: str   # b64 JPEG, 224x224 RGB
+    eyes: str        # b64 JPEG, 64x64 RGB
     mouth: str
     cheeks: str
     forehead: str
+
+
+# ── Helpers ─────────────────────────────────────────────
+
+def _pil_to_b64_jpeg(img: Image.Image, quality: int = 95) -> str:
+    """Encode a PIL image to base64 JPEG (RGB)."""
+    buf = io.BytesIO()
+    img.save(buf, format="JPEG", quality=quality)
+    return base64.b64encode(buf.getvalue()).decode("utf-8")
+
+
+def _crop_with_pad(
+    img: Image.Image,
+    points: list[tuple[int, int]],
+    padding: int,
+) -> Optional[Image.Image]:
+    """Tight bbox over points, padded, clamped to image bounds — PIL crop."""
+    if not points:
+        return None
+    xs = [p[0] for p in points]
+    ys = [p[1] for p in points]
+    w, h = img.size
+    x1 = max(0, min(xs) - padding)
+    y1 = max(0, min(ys) - padding)
+    x2 = min(w, max(xs) + padding)
+    y2 = min(h, max(ys) + padding)
+    if x2 <= x1 or y2 <= y1:
+        return None
+    return img.crop((x1, y1, x2, y2))
 
 
 class FaceDetector:
@@ -88,13 +124,13 @@ class FaceDetector:
         self._mp = None
         self._insight = None
 
-    # ── MTCNN ──────────────────────────────────────────
+    # ── MTCNN — face detection ─────────────────────────
 
     def _get_mtcnn(self):
         if self._mtcnn is None:
             try:
                 from mtcnn import MTCNN
-                # MTCNN 1.0+ dropped min_face_size from __init__; filter below.
+                # MTCNN 1.0+ dropped min_face_size from __init__.
                 self._mtcnn = MTCNN()
                 logger.info("MTCNN loaded")
             except ImportError:
@@ -102,17 +138,16 @@ class FaceDetector:
                 self._mtcnn = False
         return self._mtcnn if self._mtcnn is not False else None
 
-    def _detect_faces_mtcnn(self, image_rgb: np.ndarray) -> list[dict]:
+    def _detect_faces_mtcnn(self, rgb_np: np.ndarray) -> list[dict]:
         mtcnn = self._get_mtcnn()
         if mtcnn is None:
             return []
-        results = mtcnn.detect_faces(image_rgb)
+        results = mtcnn.detect_faces(rgb_np)
         faces = []
         for r in results:
             if r["confidence"] < self.min_confidence:
                 continue
             x, y, w, h = r["box"]
-            # Filter tiny faces here (post-hoc) since MTCNN 1.0 no longer accepts min_face_size.
             if w < 40 or h < 40:
                 continue
             faces.append({
@@ -121,17 +156,17 @@ class FaceDetector:
             })
         return faces
 
-    # ── MediaPipe (polygon landmarks) ──────────────────
+    # ── MediaPipe FaceMesh — polygon landmark extraction ─
 
     def _get_mediapipe(self):
         if self._mp is None:
             try:
                 import mediapipe as mp
+                # static_image_mode + max_num_faces=1 matches training defaults.
                 self._mp = mp.solutions.face_mesh.FaceMesh(
                     static_image_mode=True,
                     max_num_faces=1,
-                    refine_landmarks=True,
-                    min_detection_confidence=0.3,
+                    min_detection_confidence=0.5,
                 )
                 logger.info("MediaPipe FaceMesh loaded")
             except ImportError:
@@ -139,33 +174,39 @@ class FaceDetector:
                 self._mp = False
         return self._mp if self._mp is not False else None
 
-    def _region_boxes_from_mediapipe(
-        self, face128_rgb: np.ndarray,
-    ) -> Optional[dict[str, tuple[int, int, int, int]]]:
+    def _region_pil_crops_from_mediapipe(
+        self, face_pil_128: Image.Image,
+    ) -> Optional[dict[str, Image.Image]]:
+        """
+        Run MediaPipe on the 128x128 face crop and return PIL crops for each
+        region — bbox of landmark polygon + 10px pad — identical to training.
+        Returns None if MediaPipe finds nothing or any region fails.
+        """
         mp_detector = self._get_mediapipe()
         if mp_detector is None:
             return None
-        results = mp_detector.process(face128_rgb)
+
+        rgb_np = np.array(face_pil_128)
+        results = mp_detector.process(rgb_np)
         if not results.multi_face_landmarks:
             return None
+
         landmarks = results.multi_face_landmarks[0].landmark
-        h, w = face128_rgb.shape[:2]
-        boxes: dict[str, tuple[int, int, int, int]] = {}
-        for region, indices in REGION_LANDMARKS.items():
-            xs = [int(landmarks[i].x * w) for i in indices]
-            ys = [int(landmarks[i].y * h) for i in indices]
-            if not xs or not ys:
-                continue
-            rx1 = max(0, min(xs) - REGION_PAD)
-            ry1 = max(0, min(ys) - REGION_PAD)
-            rx2 = min(w, max(xs) + REGION_PAD)
-            ry2 = min(h, max(ys) + REGION_PAD)
-            if rx2 <= rx1 or ry2 <= ry1:
-                continue
-            boxes[region] = (rx1, ry1, rx2, ry2)
-        if len(boxes) < 4:
-            return None
-        return boxes
+        w, h = face_pil_128.size
+
+        def points_for(indices):
+            return [
+                (int(landmarks[i].x * w), int(landmarks[i].y * h))
+                for i in indices
+            ]
+
+        crops: dict[str, Image.Image] = {}
+        for region, idxs in REGION_LANDMARKS.items():
+            patch = _crop_with_pad(face_pil_128, points_for(idxs), REGION_PAD)
+            if patch is None:
+                return None
+            crops[region] = patch
+        return crops
 
     # ── InsightFace fallback ───────────────────────────
 
@@ -184,19 +225,24 @@ class FaceDetector:
                 self._insight = False
         return self._insight if self._insight is not False else None
 
-    def _region_boxes_from_insightface(
-        self, face128_bgr: np.ndarray,
-    ) -> Optional[dict[str, tuple[int, int, int, int]]]:
+    def _region_pil_crops_from_insightface(
+        self, face_pil_128: Image.Image,
+    ) -> Optional[dict[str, Image.Image]]:
+        """Fallback when MediaPipe fails — coarse boxes around 5 keypoints."""
         app = self._get_insightface()
         if app is None:
             return None
-        faces = app.get(face128_bgr)
+        # InsightFace expects BGR numpy
+        rgb_np = np.array(face_pil_128)
+        bgr_np = rgb_np[:, :, ::-1].copy()
+        faces = app.get(bgr_np)
         if not faces or faces[0].kps is None or len(faces[0].kps) < 5:
             return None
-        kps = faces[0].kps
-        h, w = face128_bgr.shape[:2]
 
-        def box_around(cx, cy, side):
+        kps = faces[0].kps  # left_eye, right_eye, nose, mouth_left, mouth_right
+        w, h = face_pil_128.size
+
+        def box(cx: float, cy: float, side: int) -> tuple[int, int, int, int]:
             half = side // 2
             return (
                 max(0, int(cx - half)), max(0, int(cy - half)),
@@ -210,49 +256,60 @@ class FaceDetector:
         mouth_cy = (kps[3][1] + kps[4][1]) / 2
         mouth_side = max(int(abs(kps[4][0] - kps[3][0]) * 1.6), REGION_SIZE)
 
-        return {
-            "eyes":     box_around(eye_cx, eye_cy, eye_side),
-            "mouth":    box_around(mouth_cx, mouth_cy, mouth_side),
-            "cheeks":   box_around(kps[2][0], kps[2][1] + h * 0.1, int(w * 0.55)),
-            "forehead": box_around(eye_cx, eye_cy - h * 0.2, int(w * 0.6)),
+        boxes = {
+            "eyes":     box(eye_cx, eye_cy, eye_side),
+            "mouth":    box(mouth_cx, mouth_cy, mouth_side),
+            "cheeks":   box(kps[2][0], kps[2][1] + h * 0.1, int(w * 0.55)),
+            "forehead": box(eye_cx, eye_cy - h * 0.2, int(w * 0.6)),
         }
+        return {name: face_pil_128.crop(b) for name, b in boxes.items()}
 
     # ── Estimated fallback ─────────────────────────────
 
     @staticmethod
-    def _region_boxes_estimated(face_w: int, face_h: int) -> dict[str, tuple[int, int, int, int]]:
-        def b(cx_f, cy_f, w_f, h_f):
-            cx = face_w * cx_f
-            cy = face_h * cy_f
-            hw = (face_w * w_f) / 2
-            hh = (face_h * h_f) / 2
+    def _region_pil_crops_estimated(face_pil_128: Image.Image) -> dict[str, Image.Image]:
+        w, h = face_pil_128.size
+
+        def b(cx_f: float, cy_f: float, w_f: float, h_f: float) -> tuple[int, int, int, int]:
+            cx = w * cx_f
+            cy = h * cy_f
+            hw = (w * w_f) / 2
+            hh = (h * h_f) / 2
             return (
                 max(0, int(cx - hw)), max(0, int(cy - hh)),
-                min(face_w, int(cx + hw)), min(face_h, int(cy + hh)),
+                min(w, int(cx + hw)), min(h, int(cy + hh)),
             )
+
         return {
-            "eyes":     b(0.50, 0.36, 0.70, 0.20),
-            "mouth":    b(0.50, 0.77, 0.45, 0.20),
-            "cheeks":   b(0.50, 0.58, 0.78, 0.22),
-            "forehead": b(0.50, 0.16, 0.70, 0.20),
+            "eyes":     face_pil_128.crop(b(0.50, 0.36, 0.70, 0.20)),
+            "mouth":    face_pil_128.crop(b(0.50, 0.77, 0.45, 0.20)),
+            "cheeks":   face_pil_128.crop(b(0.50, 0.58, 0.78, 0.22)),
+            "forehead": face_pil_128.crop(b(0.50, 0.16, 0.70, 0.20)),
         }
 
     # ── Public API ─────────────────────────────────────
 
     def detect_and_crop(self, image_bytes: bytes) -> list[FaceWithCrops]:
-        arr = np.frombuffer(image_bytes, dtype=np.uint8)
-        image_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
-        if image_bgr is None:
-            logger.error("Failed to decode image bytes")
+        # Decode through PIL — handles JPEG/PNG/WebP, gives RGB directly.
+        try:
+            image_pil = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+        except Exception as e:
+            logger.error("Failed to decode image bytes: %s", e)
             return []
 
-        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
-        img_h, img_w = image_bgr.shape[:2]
+        rgb_np = np.array(image_pil)
+        img_h, img_w = rgb_np.shape[:2]
 
-        faces = self._detect_faces_mtcnn(image_rgb)
+        faces = self._detect_faces_mtcnn(rgb_np)
         if not faces:
             logger.debug("MTCNN found nothing — falling back to center crop")
-            faces = [self._fallback_centered_face(img_w, img_h)]
+            side = min(img_h, img_w)
+            cx, cy = img_w // 2, img_h // 2
+            half = side // 2
+            faces = [{
+                "bbox": (cx - half, cy - half, cx + half, cy + half),
+                "confidence": 0.1,
+            }]
 
         results: list[FaceWithCrops] = []
         for face in faces:
@@ -262,30 +319,36 @@ class FaceDetector:
             if x2 <= x1 or y2 <= y1:
                 continue
 
-            face_bgr_128 = cv2.resize(image_bgr[y1:y2, x1:x2], (TRAIN_FACE, TRAIN_FACE))
-            face_rgb_128 = cv2.cvtColor(face_bgr_128, cv2.COLOR_BGR2RGB)
+            # Crop face from original PIL, resize to 128 (training scale)
+            face_pil_128 = image_pil.crop((x1, y1, x2, y2)).resize((TRAIN_FACE, TRAIN_FACE))
 
+            # Region crops — 3 tiers
             tier = "mediapipe"
-            region_boxes = self._region_boxes_from_mediapipe(face_rgb_128)
-            if region_boxes is None:
-                region_boxes = self._region_boxes_from_insightface(face_bgr_128)
+            region_crops = self._region_pil_crops_from_mediapipe(face_pil_128)
+            if region_crops is None:
+                region_crops = self._region_pil_crops_from_insightface(face_pil_128)
                 tier = "insightface"
-            if region_boxes is None:
-                region_boxes = self._region_boxes_estimated(TRAIN_FACE, TRAIN_FACE)
+            if region_crops is None:
+                region_crops = self._region_pil_crops_estimated(face_pil_128)
                 tier = "fallback"
 
-            crops: dict[str, np.ndarray] = {}
-            for region, (rx1, ry1, rx2, ry2) in region_boxes.items():
-                patch = face_bgr_128[ry1:ry2, rx1:rx2]
-                if patch.size == 0:
-                    patch = face_bgr_128
-                crops[region] = cv2.resize(patch, (REGION_SIZE, REGION_SIZE))
-            crops["face"] = cv2.resize(face_bgr_128, (FACE_SIZE, FACE_SIZE))
+            # Resize regions to 64x64 (PIL — same as training)
+            region_crops = {
+                name: img.resize((REGION_SIZE, REGION_SIZE))
+                for name, img in region_crops.items()
+            }
 
-            b64: dict[str, str] = {}
-            for name, img in crops.items():
-                _, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                b64[name] = base64.b64encode(buf.tobytes()).decode("utf-8")
+            # Face for the model is 224x224 — upscale from the 128 crop with PIL
+            face_pil_224 = face_pil_128.resize((FACE_SIZE, FACE_SIZE))
+
+            # JPEG-encode + base64 each (RGB, quality 95 — matches training save)
+            b64 = {
+                "face":     _pil_to_b64_jpeg(face_pil_224),
+                "eyes":     _pil_to_b64_jpeg(region_crops["eyes"]),
+                "mouth":    _pil_to_b64_jpeg(region_crops["mouth"]),
+                "cheeks":   _pil_to_b64_jpeg(region_crops["cheeks"]),
+                "forehead": _pil_to_b64_jpeg(region_crops["forehead"]),
+            }
 
             det = FaceDetection(
                 bbox=(x1, y1, x2, y2),
@@ -303,13 +366,3 @@ class FaceDetector:
             ))
 
         return results
-
-    @staticmethod
-    def _fallback_centered_face(img_w: int, img_h: int) -> dict:
-        side = min(img_h, img_w)
-        cx, cy = img_w // 2, img_h // 2
-        half = side // 2
-        return {
-            "bbox": (cx - half, cy - half, cx + half, cy + half),
-            "confidence": 0.1,
-        }
