@@ -297,20 +297,46 @@ class FaceDetector:
             logger.error("Failed to decode image bytes: %s", e)
             return []
 
-        img_w, img_h = image_pil.size
+        rgb_np = np.array(image_pil)
+        img_h, img_w = rgb_np.shape[:2]
 
-        # NO MTCNN. Training's convert_dataset() never ran MTCNN — it took the
-        # input image as-is (already-cropped headshots from FER+/RAF-DB/AffectNet)
-        # and resized to 128. Production now matches: treat the whole upload as
-        # the face. User is expected to upload a headshot, not a wide-angle photo.
-        faces = [{
-            "bbox": (0, 0, img_w, img_h),
-            "confidence": 1.0,
-        }]
+        # MTCNN on the original image to find the face. We then pad the bbox
+        # by ~30% on each side to match the framing of the pre-cropped public
+        # datasets the model was trained on (FER+/RAF-DB/AffectNet headshots
+        # show the whole head + bit of shoulders, not a tight face-only crop).
+        # Without padding, MTCNN gives a much tighter crop than what training
+        # saw and MediaPipe ends up landmarking a different framing — eyes
+        # row in the 128 face is off, region crops drift, predictions break.
+        faces_raw = self._detect_faces_mtcnn(rgb_np)
+        if not faces_raw:
+            logger.debug("MTCNN found nothing — treating whole image as face")
+            faces_raw = [{
+                "bbox": (0, 0, img_w, img_h),
+                "confidence": 0.1,
+            }]
+
+        pad_ratio = 0.30
+        faces: list[dict] = []
+        for f in faces_raw:
+            x1, y1, x2, y2 = f["bbox"]
+            bw, bh = x2 - x1, y2 - y1
+            pad_x = int(bw * pad_ratio)
+            pad_y = int(bh * pad_ratio)
+            faces.append({
+                "bbox": (
+                    max(0, x1 - pad_x),
+                    max(0, y1 - pad_y),
+                    min(img_w, x2 + pad_x),
+                    min(img_h, y2 + pad_y),
+                ),
+                "confidence": f["confidence"],
+            })
 
         results: list[FaceWithCrops] = []
         for face in faces:
             x1, y1, x2, y2 = face["bbox"]
+            if x2 <= x1 or y2 <= y1:
+                continue
 
             # Crop face from original PIL, resize to 128 (training scale)
             face_pil_128 = image_pil.crop((x1, y1, x2, y2)).resize((TRAIN_FACE, TRAIN_FACE))
