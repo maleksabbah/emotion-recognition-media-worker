@@ -1,15 +1,15 @@
-pydantic>=2.6
-aiokafka>=0.11
-redis>=5.0
-httpx>=0.27
-boto3>=1.34
-numpy>=1.26
-opencv-python-headless>=4.9
-pillow>=10.0
+pydantic==2.9.2
+aiokafka==0.11.0
+redis==5.2.0
+httpx==0.27.2
+boto3==1.35.50
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+pillow==10.4.0
 
-# Face detection
-mtcnn>=0.1
-mediapipe>=0.10
-insightface>=0.7
-onnxruntime>=1.17
-tensorflow>=2.15
+# Face detection — versions known to play nicely together
+mtcnn==1.0.0
+mediapipe==0.10.18
+insightface==0.7.3
+onnxruntime==1.18.1
+tensorflow==2.17.0
