@@ -92,7 +92,10 @@ class MediaService:
                     w=fc.detection.bbox[2] - fc.detection.bbox[0],
                     h=fc.detection.bbox[3] - fc.detection.bbox[1],
                 ),
-                landmark_tier=fc.detection.detector,
+                # DTO requires Literal["mediapipe", "insightface", "fallback"].
+                # `detector` is the composite "mtcnn+<tier>" used for logs;
+                # `landmark_tier` is the clean enum value.
+                landmark_tier=fc.detection.landmark_tier,
                 face_crop=fc.face_crop,
                 region_crops=RegionCrops(
                     eyes=fc.eyes,
