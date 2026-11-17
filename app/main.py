@@ -43,8 +43,10 @@ async def kafka_loop(
             task = MediaTask.model_validate(raw)
         except Exception as e:
             logger.error("Bad MediaTask from Kafka: %s", e)
+            await consumer.commit()
             continue
         await _handle(task, media, producer)
+        await consumer.commit()
 
 
 async def redis_loop(
@@ -78,6 +80,15 @@ async def _handle(
         result = await media.process_task(task)
     except Exception as e:
         logger.exception("process_task failed: %s", e)
+        await producer.publish_media_result({
+            "task_id": task.task_id,
+            "session_id": task.session_id,
+            "frame_number": task.frame_number,
+            "timestamp_ms": task.timestamp_ms,
+            "status": "failed",
+            "error": str(e),
+            "worker_id": WORKER_ID,
+        })
         return
     if result is None:
         return

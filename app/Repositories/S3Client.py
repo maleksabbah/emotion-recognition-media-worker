@@ -35,6 +35,9 @@ class S3Client:
         )
 
     async def fetch_object(self, s3_key: str) -> bytes:
+        if not s3_key.startswith("sessions/") or ".." in s3_key:
+            raise ValueError(f"Rejected S3 key: {s3_key!r}")
+
         def _go() -> bytes:
             resp = self._client.get_object(Bucket=S3_BUCKET, Key=s3_key)
             return resp["Body"].read()

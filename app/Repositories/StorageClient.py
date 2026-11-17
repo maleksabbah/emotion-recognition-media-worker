@@ -11,6 +11,7 @@ import logging
 import httpx
 
 from app.Config import STORAGE_SERVICE_URL
+from app.Security.ServiceAuth import sign_request
 
 logger = logging.getLogger("media-worker.storage")
 
@@ -44,7 +45,9 @@ class StorageClient:
             "crops": crops_b64,
         }
         resp = await self._http.post(
-            f"{STORAGE_SERVICE_URL}/internal/save-crops", json=body
+            f"{STORAGE_SERVICE_URL}/internal/save-crops",
+            json=body,
+            headers=sign_request({}),
         )
         if resp.status_code != 200:
             logger.error("save_crops failed %s: %s", resp.status_code, resp.text)

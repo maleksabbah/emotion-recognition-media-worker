@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Optional
 
 import redis.asyncio as redis
@@ -20,6 +21,7 @@ logger = logging.getLogger("media-worker.redis")
 
 _FRAME_PREFIX = "frame"
 _QUEUE_PREFIX = "queue:frames"
+_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.IGNORECASE)
 
 
 class RedisRepository:
@@ -69,9 +71,17 @@ class RedisRepository:
     # ── Keys ─────────────────────────────────────────
 
     @staticmethod
+    def _validate_uuid(value: str, name: str) -> None:
+        if not _UUID_RE.match(value):
+            raise ValueError(f"{name} is not a valid UUID: {value!r}")
+
+    @staticmethod
     def _frame_key(session_id: str, frame_id: str) -> str:
+        RedisRepository._validate_uuid(session_id, "session_id")
+        RedisRepository._validate_uuid(frame_id, "frame_id")
         return f"{_FRAME_PREFIX}:{session_id}:{frame_id}"
 
     @staticmethod
     def _queue_key(session_id: str) -> str:
+        RedisRepository._validate_uuid(session_id, "session_id")
         return f"{_QUEUE_PREFIX}:{session_id}"

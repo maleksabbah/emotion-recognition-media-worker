@@ -8,7 +8,12 @@ import logging
 
 from aiokafka import AIOKafkaProducer
 
-from app.Config import KAFKA_BOOTSTRAP_SERVERS, MEDIA_RESULTS_TOPIC
+from app.Config import (
+    KAFKA_BOOTSTRAP_SERVERS,
+    KAFKA_SASL_USERNAME,
+    KAFKA_SASL_PASSWORD,
+    MEDIA_RESULTS_TOPIC,
+)
 
 logger = logging.getLogger("media-worker.kafka-producer")
 
@@ -18,7 +23,15 @@ class KafkaProducer:
         self._producer: AIOKafkaProducer | None = None
 
     async def start(self) -> None:
-        self._producer = AIOKafkaProducer(bootstrap_servers=KAFKA_BOOTSTRAP_SERVERS)
+        kafka_kwargs = {"bootstrap_servers": KAFKA_BOOTSTRAP_SERVERS}
+        if KAFKA_SASL_USERNAME:
+            kafka_kwargs.update({
+                "security_protocol": "SASL_SSL",
+                "sasl_mechanism": "SCRAM-SHA-256",
+                "sasl_plain_username": KAFKA_SASL_USERNAME,
+                "sasl_plain_password": KAFKA_SASL_PASSWORD,
+            })
+        self._producer = AIOKafkaProducer(**kafka_kwargs)
         await self._producer.start()
 
     async def stop(self) -> None:

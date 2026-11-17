@@ -15,6 +15,8 @@ WORKER_ID = os.getenv("WORKER_ID", f"media-{uuid.uuid4().hex[:8]}")
 # ─── Kafka ─────────────────────────────────────────────────────────────
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
+KAFKA_SASL_USERNAME = os.getenv("KAFKA_SASL_USERNAME", "")
+KAFKA_SASL_PASSWORD = os.getenv("KAFKA_SASL_PASSWORD", "")
 MEDIA_TASKS_TOPIC = os.getenv("MEDIA_TASKS_TOPIC", "media_tasks")
 MEDIA_RESULTS_TOPIC = os.getenv("MEDIA_RESULTS_TOPIC", "media_results")
 MEDIA_GROUP_ID = os.getenv("MEDIA_GROUP_ID", "media-workers")
@@ -31,8 +33,8 @@ REDIS_URL = os.getenv("REDIS_URL", f"redis://{REDIS_HOST}:{REDIS_PORT}")
 
 S3_INTERNAL_ENDPOINT = os.getenv("S3_INTERNAL_ENDPOINT", "http://minio:9000")
 S3_BUCKET = os.getenv("S3_BUCKET", "emotion")
-S3_ACCESS_KEY = os.getenv("S3_ACCESS_KEY", "minioadmin")
-S3_SECRET_KEY = os.getenv("S3_SECRET_KEY", "minioadmin")
+S3_ACCESS_KEY = os.environ["S3_ACCESS_KEY"]
+S3_SECRET_KEY = os.environ["S3_SECRET_KEY"]
 S3_REGION = os.getenv("S3_REGION", "us-east-1")
 
 
