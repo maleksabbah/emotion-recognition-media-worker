@@ -14,9 +14,6 @@ import logging
 import os
 import time
 
-from fastapi import Request
-from starlette import status
-from fastapi.responses import JSONResponse
 
 logger = logging.getLogger(__name__)
 
@@ -49,7 +46,7 @@ def sign_request(headers: dict[str, str]) -> dict[str, str]:
 
 # ── Inbound (routes) ───────────────────────────────────────────────────
 
-async def require_service_auth(request: Request) -> None:
+async def require_service_auth(request) -> None:
     """
     FastAPI dependency. Rejects requests that fail HMAC verification.
     Fails open when SERVICE_SECRET is empty (local dev / test).
@@ -93,6 +90,6 @@ def _compute_signature(timestamp: str) -> str:
 def _forbidden():
     from fastapi import HTTPException
     return HTTPException(
-        status_code=status.HTTP_403_FORBIDDEN,
+        status_code=403,
         detail="Service authentication failed",
     )

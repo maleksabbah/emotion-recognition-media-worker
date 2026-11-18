@@ -3,6 +3,7 @@ KafkaProducer — publishes MediaResult dicts to media_results topic.
 """
 from __future__ import annotations
 
+import ssl
 import json
 import logging
 
@@ -27,6 +28,7 @@ class KafkaProducer:
         if KAFKA_SASL_USERNAME:
             kafka_kwargs.update({
                 "security_protocol": "SASL_SSL",
+                "ssl_context": ssl.create_default_context(),
                 "sasl_mechanism": "SCRAM-SHA-256",
                 "sasl_plain_username": KAFKA_SASL_USERNAME,
                 "sasl_plain_password": KAFKA_SASL_PASSWORD,
