@@ -22,7 +22,7 @@ from app.Repositories.RedisRepository import RedisRepository
 from app.Repositories.S3Client import S3Client
 from app.Repositories.StorageClient import StorageClient
 from app.Services.Detector import FaceDetector
-from app.Services.MediaService import MediaService, VideoTooLong
+from app.Services.MediaService import MediaService
 
 logging.basicConfig(
     level=logging.INFO,
@@ -79,10 +79,7 @@ async def _handle(
     try:
         result = await media.process_task(task)
     except Exception as e:
-        if isinstance(e, VideoTooLong):
-            logger.info("Rejected session %s: %s", task.session_id, e)
-        else:
-            logger.exception("process_task failed: %s", e)
+        logger.exception("process_task failed: %s", e)
         await producer.publish_media_result({
             "task_id": task.task_id,
             "session_id": task.session_id,
@@ -90,9 +87,6 @@ async def _handle(
             "timestamp_ms": task.timestamp_ms,
             "status": "failed",
             "error": str(e),
-            # Set for user-facing failures (e.g. video_too_long); the
-            # orchestrator only shows `error` to users when this is set.
-            "code": getattr(e, "code", None),
             "worker_id": WORKER_ID,
         })
         return
